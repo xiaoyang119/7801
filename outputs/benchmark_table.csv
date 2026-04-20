@@ -1,0 +1,3 @@
+Model,AUC-ROC,KS Statistic,Gini Coefficient,PR-AUC (Avg Prec),F-beta (β=2),Brier Score
+LR Baseline,0.8319,0.5074,0.6639,0.3342,0.4623,0.1652
+LGBM Champion,0.8612,0.5727,0.7224,0.3974,0.5175,0.1246

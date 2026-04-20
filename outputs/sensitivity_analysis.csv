@@ -1,0 +1,11 @@
+Feature,Avg |Score Δ|
+age,0.013805000000000001
+RevolvingUtilizationOfUnsecuredLines,0.01169
+MonthlyIncome,0.00482
+NumberOfOpenCreditLinesAndLoans,0.00451
+DebtRatio,0.00375
+NumberOfTime60-89DaysPastDueNotWorse,0.00146
+NumberOfTimes90DaysLate,0.001335
+NumberRealEstateLoansOrLines,0.000965
+NumberOfDependents,0.000225
+NumberOfTime30-59DaysPastDueNotWorse,0.000175

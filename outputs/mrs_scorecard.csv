@@ -1,0 +1,5 @@
+Dimension,Max Points,Score,Score %,Justification
+Materiality,30,27,90%,"Model affects loan decisions for 150,000 borrowers. Credit scoring is core to financial institution solvency. Score: 27/30."
+Regulatory Exposure,30,25,83%,"SR 11-7 compliance is mandatory. Age-based features create ECOA exposure. LightGBM lacks native explainability, increasing examiner risk. Score: 25/30."
+Operational Factor,10,8,80%,Pipeline is fully automated with no manual override documented. Operational risk is elevated. Score: 8/10.
+Model Complexity,30,28,93%,Pipeline has 5 sequential steps including polynomial feature expansion. LGBM is inherently non-interpretable. WOE encoding on cluster labels introduces double-layer non-linearity. Score: 28/30.

@@ -1,0 +1,30 @@
+=================================================================
+  EXECUTIVE SUMMARY — FRE 7801 MRM CAPSTONE
+=================================================================
+
+  Model Under Review: LightGBM Credit Scoring Pipeline
+  Dataset: Give Me Some Credit (Kaggle 2011)
+  Kaggle Private AUC: 0.86914 (Top 5 / ~927 teams)
+
+  ── Performance Comparison (Validation Set) ──
+  LR Baseline           AUC=0.8319  KS=0.5074  Gini=0.6639
+  LGBM Champion         AUC=0.8612  KS=0.5727  Gini=0.7224
+
+  ── Population Stability (PSI) ──
+  Features with PSI > 0.10: 0  ()
+
+  ── Fairness (Age-Based Disparate Impact) ──
+  Minimum DIR across age groups: 0.3020
+  4/5 Rule violated: YES ⚠️
+
+  ── Risk Tier (Kiritz et al., 2019) ──
+  MRS Score: 88/100  →  Tier 1 — HIGH RISK
+
+  ── Key Recommended Mitigants ──
+  1. Document XGBRegressor imputation as separate sub-model
+  2. Implement monthly PSI monitoring trigger
+  3. Add human override layer for borderline scores
+  4. Conduct periodic fairness (ECOA) testing in production
+  5. Re-validate model if AUC degrades > 2% from baseline
+
+=================================================================
