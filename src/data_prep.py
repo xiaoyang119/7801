@@ -39,6 +39,7 @@ FEATURES = [
 ]
 
 MISSING_FEATURES = ["MonthlyIncome", "NumberOfDependents"]
+MISSING_INDICATOR_FEATURES = [f"{f}_missing" for f in MISSING_FEATURES]
 
 OUTLIER_CAPS = {
     # Feature: (lower_cap, upper_cap) — None means no cap on that side
@@ -135,6 +136,12 @@ def impute_missing(train: pd.DataFrame, test: pd.DataFrame,
     train = train.copy()
     test  = test.copy()
 
+    # Preserve missingness before imputation. Missingness itself can be a
+    # credit-risk signal and should be available for validation and monitoring.
+    for f in MISSING_FEATURES:
+        train[f"{f}_missing"] = train[f].isna().astype(int)
+        test[f"{f}_missing"]  = test[f].isna().astype(int)
+
     if method == "xgb":
         train, test = _xgb_impute(train, test)
     else:
@@ -144,10 +151,6 @@ def impute_missing(train: pd.DataFrame, test: pd.DataFrame,
             train[f] = train[f].fillna(medians[f])
             test[f]  = test[f].fillna(medians[f])
             print(f"[Impute] {f}: filled with median {medians[f]:.2f}")
-
-        # Add missingness indicator for MonthlyIncome (data quality signal)
-        train["MonthlyIncome_missing"] = (train["MonthlyIncome"].isna()).astype(int)
-        test["MonthlyIncome_missing"]  = (test["MonthlyIncome"].isna()).astype(int)
 
     return train, test
 
@@ -187,7 +190,162 @@ def _xgb_impute(train: pd.DataFrame, test: pd.DataFrame
     return train, test
 
 
-# ── 4. Outlier treatment ─────────────────────────────────────────────────────
+# ── 4. Imputation assumption validation ──────────────────────────────────────
+
+def imputation_validation(train_raw: pd.DataFrame,
+                          train_imp: pd.DataFrame,
+                          output_dir: str) -> pd.DataFrame:
+    """
+    Validate every assumption behind the median imputation strategy.
+
+    Assumption 1 — Informativeness (MCAR test)
+        Chi-square test of independence between missingness indicator and target.
+        If rejected (p < 0.05): missingness is NOT random → keeping the
+        indicator flag as a model feature is validated.
+
+    Assumption 2 — Default rate difference (bias check)
+        Compare P(default | feature missing) vs P(default | feature present).
+        A large difference means imputing with the global median introduces
+        systematic bias; the missingness indicator partially corrects for this.
+
+    Assumption 3 — Distribution shape (median appropriateness)
+        Check skewness of observed values. For right-skewed distributions
+        median is a better central-tendency imputation than mean.
+
+    Assumption 4 — No data leakage
+        Verify medians are derived from training data only (not val/test).
+        Documented here; confirmed by code structure in impute_missing().
+
+    Assumption 5 — Missingness stability (train vs. val)
+        PSI of missingness indicators. Already in psi_report(); cited here
+        for completeness in the imputation evidence package.
+    """
+    from scipy import stats
+
+    os.makedirs(output_dir, exist_ok=True)
+    results = []
+
+    for feat in MISSING_FEATURES:
+        miss_mask = train_raw[feat].isna()
+        present   = train_raw.loc[~miss_mask, feat]
+        missing_n = int(miss_mask.sum())
+        total_n   = len(train_raw)
+        miss_rate = missing_n / total_n
+
+        # ── Assumption 1: MCAR chi-square test ──────────────────────────────
+        contingency = pd.crosstab(miss_mask, train_raw[TARGET])
+        chi2, p_chi2, _, _ = stats.chi2_contingency(contingency)
+        mcar_result = "REJECTED (informative)" if p_chi2 < 0.05 else "Not rejected (MCAR plausible)"
+
+        # ── Assumption 2: Default rate difference ────────────────────────────
+        dr_missing = train_raw.loc[miss_mask,  TARGET].mean()
+        dr_present = train_raw.loc[~miss_mask, TARGET].mean()
+        dr_ratio   = dr_missing / dr_present if dr_present > 0 else np.nan
+
+        # ── Assumption 3: Distribution shape ────────────────────────────────
+        skewness = float(present.skew())
+        median_v = float(present.median())
+        mean_v   = float(present.mean())
+        median_preferred = abs(skewness) > 1.0  # rule of thumb
+
+        # ── Assumption 4: Leakage check ──────────────────────────────────────
+        # Medians in train_imp are derived from train_raw (non-missing rows).
+        # The imputed value for this feature in train_imp should equal median_v.
+        imputed_val = train_imp.loc[miss_mask, feat].iloc[0] if missing_n > 0 else np.nan
+        leakage_ok  = abs(imputed_val - median_v) < 1e-6 if not np.isnan(imputed_val) else True
+
+        results.append({
+            "Feature":               feat,
+            "Missing N":             missing_n,
+            "Missing Rate":          f"{miss_rate:.2%}",
+            "A1 MCAR chi2":          round(chi2, 2),
+            "A1 p-value":            round(p_chi2, 4),
+            "A1 Result":             mcar_result,
+            "A2 DR (missing)":       round(dr_missing, 4),
+            "A2 DR (present)":       round(dr_present, 4),
+            "A2 DR ratio":           round(dr_ratio, 3),
+            "A3 Skewness":           round(skewness, 3),
+            "A3 Median":             round(median_v, 2),
+            "A3 Mean":               round(mean_v, 2),
+            "A3 Median preferred":   "Yes" if median_preferred else "No",
+            "A4 Leakage-free":       "Pass" if leakage_ok else "FAIL",
+        })
+
+        print(f"\n[Imputation Validation] {feat}")
+        print(f"  Missing: {missing_n:,} / {total_n:,} ({miss_rate:.2%})")
+        print(f"  A1 MCAR chi2={chi2:.2f}  p={p_chi2:.4f}  → {mcar_result}")
+        print(f"  A2 Default rate: missing={dr_missing:.4f}  present={dr_present:.4f}  "
+              f"ratio={dr_ratio:.3f}")
+        print(f"  A3 Skewness={skewness:.3f}  Median={median_v:.2f}  Mean={mean_v:.2f}  "
+              f"→ median {'preferred' if median_preferred else 'adequate'}")
+        print(f"  A4 Leakage-free: {'Pass' if leakage_ok else 'FAIL'}")
+
+    df_val = pd.DataFrame(results)
+    df_val.to_csv(os.path.join(output_dir, "imputation_validation.csv"), index=False)
+
+    # ── Visualization ─────────────────────────────────────────────────────────
+    n_feats = len(MISSING_FEATURES)
+    fig, axes = plt.subplots(2, n_feats, figsize=(7 * n_feats, 10))
+    fig.suptitle("Imputation Assumption Validation\n"
+                 "Median imputation — MonthlyIncome & NumberOfDependents",
+                 fontsize=13, fontweight="bold")
+
+    for col_idx, feat in enumerate(MISSING_FEATURES):
+        miss_mask = train_raw[feat].isna()
+        present   = train_raw.loc[~miss_mask, feat]
+        median_v  = float(present.median())
+
+        # Top row: distribution of observed values + median line
+        ax_top = axes[0, col_idx] if n_feats > 1 else axes[0]
+        clip_hi = present.quantile(0.99)
+        ax_top.hist(present.clip(upper=clip_hi), bins=60,
+                    color="#1A3C80", alpha=0.75, edgecolor="white")
+        ax_top.axvline(median_v, color="#E8B84B", linewidth=2,
+                       label=f"Median = {median_v:.1f}")
+        ax_top.axvline(present.mean(), color="#C03A3A", linewidth=2, linestyle="--",
+                       label=f"Mean = {present.mean():.1f}")
+        skew_val = present.skew()
+        ax_top.set_title(f"{feat}\nDistribution (observed, clipped at p99)\n"
+                         f"Skewness={skew_val:.2f}")
+        ax_top.set_xlabel(feat)
+        ax_top.legend(fontsize=9)
+        ax_top.grid(axis="y", alpha=0.3)
+
+        # Bottom row: default rate by missing vs present + count
+        ax_bot = axes[1, col_idx] if n_feats > 1 else axes[1]
+        dr_miss = train_raw.loc[miss_mask, TARGET].mean()
+        dr_pres = train_raw.loc[~miss_mask, TARGET].mean()
+        groups  = ["Present", "Missing"]
+        rates   = [dr_pres, dr_miss]
+        counts  = [int(~miss_mask.sum()), int(miss_mask.sum())]
+        bars = ax_bot.bar(groups, rates,
+                          color=["#1A3C80", "#C03A3A"], alpha=0.85, width=0.5)
+        for bar, rate, cnt in zip(bars, rates, counts):
+            ax_bot.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.002,
+                        f"{rate:.3f}\n(n={cnt:,})",
+                        ha="center", va="bottom", fontsize=10)
+        ax_bot.axhline(train_raw[TARGET].mean(), color="grey",
+                       linestyle="--", label="Overall DR")
+        ax_bot.set_ylabel("Default Rate")
+        ax_bot.set_title(f"{feat}\nDefault Rate: Missing vs Present\n"
+                         f"(Ratio = {dr_miss/dr_pres:.2f}×)")
+        ax_bot.legend(fontsize=9)
+        ax_bot.set_ylim(0, max(rates) * 1.3)
+        ax_bot.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, "imputation_validation.png")
+    plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"\n[Imputation Validation] Chart saved → {plot_path}")
+    print(f"[Imputation Validation] Table saved → "
+          f"{os.path.join(output_dir, 'imputation_validation.csv')}")
+
+    return df_val
+
+
+# ── 5. Outlier treatment ────────────────────────────────────────────────────
 
 def treat_outliers(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -219,7 +377,8 @@ def make_splits(train: pd.DataFrame,
     We treat the hold-out as an out-of-sample (OSOT) test per SR 11-7.
     The full original test set (no labels) is used only for PSI.
     """
-    X = train[FEATURES]
+    model_features = model_feature_columns(train)
+    X = train[model_features]
     y = train[TARGET]
 
     X_tr, X_val, y_tr, y_val = train_test_split(
@@ -229,6 +388,11 @@ def make_splits(train: pd.DataFrame,
     print(f"[Split] Positive rate – Train: {y_tr.mean():.2%}  "
           f"Validation: {y_val.mean():.2%}")
     return X_tr, X_val, y_tr, y_val
+
+
+def model_feature_columns(df: pd.DataFrame) -> list[str]:
+    """Return base model features plus any derived missingness indicators."""
+    return FEATURES + [f for f in MISSING_INDICATOR_FEATURES if f in df.columns]
 
 
 # ── 6. Population Stability Index ────────────────────────────────────────────
@@ -265,7 +429,7 @@ def psi_report(X_train: pd.DataFrame, X_val: pd.DataFrame,
                output_dir: str) -> pd.DataFrame:
     """Compute PSI for every feature and save a colour-coded table."""
     results = []
-    for feat in FEATURES:
+    for feat in model_feature_columns(X_train):
         psi_val = compute_psi(X_train[feat], X_val[feat])
         flag = ("🟢 Stable" if psi_val < 0.10
                 else "🟡 Monitor" if psi_val < 0.25

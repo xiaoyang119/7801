@@ -7,14 +7,14 @@
   Kaggle Private AUC: 0.86914 (Top 5 / ~927 teams)
 
   ── Performance Comparison (Validation Set) ──
-  LR Baseline           AUC=0.8319  KS=0.5074  Gini=0.6639
-  LGBM Champion         AUC=0.8612  KS=0.5727  Gini=0.7224
+  LR Baseline           AUC=0.8317  KS=0.5075  Gini=0.6635
+  LGBM Champion         AUC=0.8601  KS=0.5700  Gini=0.7202
 
   ── Population Stability (PSI) ──
   Features with PSI > 0.10: 0  ()
 
   ── Fairness (Age-Based Disparate Impact) ──
-  Minimum DIR across age groups: 0.3020
+  Minimum DIR across age groups: 0.3051
   4/5 Rule violated: YES ⚠️
 
   ── Risk Tier (Kiritz et al., 2019) ──

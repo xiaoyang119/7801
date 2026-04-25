@@ -1,0 +1,8 @@
+SR 11-7 Area,Standard,Evidence,Status,Action
+Purpose and Scope,Intended use and model output are clearly defined,Credit default probability for SeriousDlqin2yrs; project plan and main pipeline document the use case,Pass,Keep model-use limitations in final report and model inventory
+Data Quality,"Inputs are assessed for completeness, relevance, and quality","EDA, missingness indicators, outlier caps, and PSI are generated",Pass,Document aged Kaggle data as a high limitation; do not claim production representativeness
+Benchmarking,Complex model is compared with a simpler alternative,LGBM AUC 0.8601 vs LR AUC 0.8317; lift 0.0284,Pass,Explain why the incremental lift justifies added complexity
+Outcomes Analysis,Performance is tested out of sample and checked for overfit,Train-validation AUC gap: 0.0644,Review,Investigate if AUC gap exceeds 3 percentage points
+Ongoing Monitoring,Stability monitoring and escalation thresholds are defined,Max validation PSI is 0.0005; monitoring thresholds are in the execution plan,Pass,Add production cadence and accountable owner in final report
+Fair Lending / Use Risk,Material compliance risks and limitations are identified,Minimum age-group DIR is 0.3051,Issue,Treat as a material limitation; consider age-blind challenger and policy override thresholds
+Governance,"Limitations, approvals, model tier, and controls are documented",MRS scorecard and SR 11-7 risk taxonomy are generated,Pass,"State that independent validation and audit are recommended controls, not performed by this student project"

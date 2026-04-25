@@ -1,0 +1,4 @@
+Model,Overall AUC,Overall KS,Min DIR
+LGBM Champion,0.8601,0.57,0.3351
+LGBM Age-Blind,0.8229,0.5055,0.5081
+LR Baseline,0.8317,0.5075,0.3051
