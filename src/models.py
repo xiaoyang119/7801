@@ -108,7 +108,8 @@ class WOEKMeansEncoder(BaseEstimator, TransformerMixin):
 
 # ── 3. LGBM Champion Pipeline ────────────────────────────────────────────────
 
-def build_lgbm_pipeline() -> Pipeline:
+def build_lgbm_pipeline(n_estimators: int = 5000,
+                        learning_rate: float = 0.0018) -> Pipeline:
     """
     Replicates pipe1_lgbm_woe_powertransformer95 from the Kaggle Top-5 solution.
 
@@ -127,8 +128,8 @@ def build_lgbm_pipeline() -> Pipeline:
         )
 
     lgbm_params = dict(
-        learning_rate  = 0.0018,
-        n_estimators   = 5000,
+        learning_rate  = learning_rate,
+        n_estimators   = n_estimators,
         max_depth      = 8,
         num_leaves     = 63,
         subsample      = 0.857,

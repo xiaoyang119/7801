@@ -39,12 +39,15 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ── Import project modules ────────────────────────────────────────────────────
 sys.path.insert(0, BASE_DIR)
 from src.data_prep    import (load_data, eda_summary, impute_missing,
+                               imputation_validation,
                                treat_outliers, make_splits, psi_report)
 from src.models       import (build_lr_pipeline, build_lgbm_pipeline,
                                train_model, plot_calibration)
 from src.validation   import (benchmark_table, plot_roc_pr, plot_ks,
-                               shap_analysis, sensitivity_analysis,
-                               fairness_analysis, plot_confusion_matrices)
+                               shap_analysis, cross_validate_lgbm,
+                               sensitivity_analysis,
+                               fairness_analysis, plot_confusion_matrices,
+                               validation_standard_checks)
 from src.risk_tiering import print_mrs_report, sr117_risk_table
 
 
@@ -90,6 +93,9 @@ def main():
     train_imp, test_imp = impute_missing(train_clean, test_clean,
                                          method=args.impute)
 
+    # Imputation assumption validation (SR 11-7 data quality)
+    imputation_validation(train_clean, train_imp, OUTPUT_DIR)
+
     # Train / validation split (70 / 30 stratified)
     X_train, X_val, y_train, y_val = make_splits(train_imp)
 
@@ -129,12 +135,16 @@ def main():
     print("─" * 50)
 
     # III-a: Benchmarking — head-to-head performance table
-    bench_df = benchmark_table(models, X_val, y_val, OUTPUT_DIR)
+    bench_df = benchmark_table(models, X_val, y_val, OUTPUT_DIR,
+                               X_train=X_train, y_train=y_train)
 
-    # III-b: ROC and Precision-Recall curves
+    # III-b: 5-fold CV — overfitting investigation (SR 11-7 Outcomes Analysis)
+    cross_validate_lgbm(X_train, y_train, OUTPUT_DIR)
+
+    # III-c: ROC and Precision-Recall curves
     plot_roc_pr(models, X_val, y_val, OUTPUT_DIR)
 
-    # III-c: KS plots (banking standard)
+    # III-d: KS plots (banking standard)
     for name, model in models.items():
         plot_ks(model, X_val, y_val, name, OUTPUT_DIR)
 
@@ -156,6 +166,9 @@ def main():
     # III-g: Fairness — age-based disparate impact
     fair_df = fairness_analysis(lgbm_pipeline, lr_pipeline,
                                 X_val, y_val, OUTPUT_DIR)
+
+    # III-h: SR 11-7-style validation control checklist
+    validation_standard_checks(bench_df, psi_df, fair_df, OUTPUT_DIR)
 
     # ─────────────────────────────────────────────────────────────────────────
     # STAGE 4 — RISK TIERING & SR 11-7 GOVERNANCE

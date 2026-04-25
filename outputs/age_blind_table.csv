@@ -1,0 +1,10 @@
+Age Group,Model,N,Default Rate,Approval Rate,AUC,DIR (vs best)
+Young (<30),LGBM Champion,2623,0.1254,0.247,0.8189,0.3351
+Young (<30),LGBM Age-Blind,2623,0.1254,0.3283,0.7963,0.5081
+Young (<30),LR Baseline,2623,0.1254,0.228,0.7814,0.3051
+Middle (30–60),LGBM Champion,27795,0.0812,0.3994,0.8459,0.5418
+Middle (30–60),LGBM Age-Blind,27795,0.0812,0.4396,0.8091,0.6804
+Middle (30–60),LR Baseline,27795,0.0812,0.3959,0.8173,0.5297
+Senior (>60),LGBM Champion,14582,0.0289,0.7372,0.8534,1.0
+Senior (>60),LGBM Age-Blind,14582,0.0289,0.6461,0.812,1.0
+Senior (>60),LR Baseline,14582,0.0289,0.7474,0.8131,1.0

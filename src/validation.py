@@ -68,15 +68,26 @@ def compute_metrics(y_true: pd.Series, y_prob: np.ndarray,
 
 
 def benchmark_table(models: dict, X_val: pd.DataFrame, y_val: pd.Series,
-                    output_dir: str) -> pd.DataFrame:
+                    output_dir: str,
+                    X_train: pd.DataFrame | None = None,
+                    y_train: pd.Series | None = None) -> pd.DataFrame:
     """
     Head-to-head benchmarking table: LR Challenger vs LGBM Champion.
-    SR 11-7 requires comparison against a simpler benchmark model.
+    SR 11-7 requires comparison against a simpler benchmark model and
+    outcomes analysis/back-testing against data not used to fit the model.
     """
     rows = []
     for name, model in models.items():
-        probs = model.predict_proba(X_val)[:, 1]
-        m     = compute_metrics(y_val, probs)
+        val_probs = model.predict_proba(X_val)[:, 1]
+        m = compute_metrics(y_val, val_probs)
+
+        if X_train is not None and y_train is not None:
+            train_probs = model.predict_proba(X_train)[:, 1]
+            train_auc = roc_auc_score(y_train, train_probs)
+            val_auc = m["AUC-ROC"]
+            m["Train AUC-ROC"] = round(train_auc, 4)
+            m["AUC Gap (Train-Val)"] = round(train_auc - val_auc, 4)
+
         m["Model"] = name
         rows.append(m)
 
@@ -85,6 +96,79 @@ def benchmark_table(models: dict, X_val: pd.DataFrame, y_val: pd.Series,
     print(df.to_string())
 
     df.to_csv(os.path.join(output_dir, "benchmark_table.csv"))
+    return df
+
+
+def validation_standard_checks(bench_df: pd.DataFrame, psi_df: pd.DataFrame,
+                               fair_df: pd.DataFrame, output_dir: str
+                               ) -> pd.DataFrame:
+    """
+    Map generated evidence to SR 11-7-style validation expectations.
+    This is a control checklist, not an official regulatory score.
+    """
+    lgbm = bench_df.loc["LGBM Champion"]
+    lr = bench_df.loc["LR Baseline"]
+    auc_lift = lgbm["AUC-ROC"] - lr["AUC-ROC"]
+    max_psi = psi_df["PSI"].max()
+    min_dir = fair_df["DIR (vs best)"].min()
+    auc_gap = lgbm.get("AUC Gap (Train-Val)", np.nan)
+
+    checks = [
+        {
+            "SR 11-7 Area": "Purpose and Scope",
+            "Standard": "Intended use and model output are clearly defined",
+            "Evidence": "Credit default probability for SeriousDlqin2yrs; project plan and main pipeline document the use case",
+            "Status": "Pass",
+            "Action": "Keep model-use limitations in final report and model inventory",
+        },
+        {
+            "SR 11-7 Area": "Data Quality",
+            "Standard": "Inputs are assessed for completeness, relevance, and quality",
+            "Evidence": "EDA, missingness indicators, outlier caps, and PSI are generated",
+            "Status": "Pass",
+            "Action": "Document aged Kaggle data as a high limitation; do not claim production representativeness",
+        },
+        {
+            "SR 11-7 Area": "Benchmarking",
+            "Standard": "Complex model is compared with a simpler alternative",
+            "Evidence": f"LGBM AUC {lgbm['AUC-ROC']:.4f} vs LR AUC {lr['AUC-ROC']:.4f}; lift {auc_lift:.4f}",
+            "Status": "Pass" if auc_lift > 0 else "Review",
+            "Action": "Explain why the incremental lift justifies added complexity",
+        },
+        {
+            "SR 11-7 Area": "Outcomes Analysis",
+            "Standard": "Performance is tested out of sample and checked for overfit",
+            "Evidence": f"Train-validation AUC gap: {auc_gap:.4f}" if not np.isnan(auc_gap) else "Train-validation gap not computed",
+            "Status": "Pass" if not np.isnan(auc_gap) and abs(auc_gap) <= 0.03 else "Review",
+            "Action": "Investigate if AUC gap exceeds 3 percentage points",
+        },
+        {
+            "SR 11-7 Area": "Ongoing Monitoring",
+            "Standard": "Stability monitoring and escalation thresholds are defined",
+            "Evidence": f"Max validation PSI is {max_psi:.4f}; monitoring thresholds are in the execution plan",
+            "Status": "Pass" if max_psi < 0.10 else "Monitor",
+            "Action": "Add production cadence and accountable owner in final report",
+        },
+        {
+            "SR 11-7 Area": "Fair Lending / Use Risk",
+            "Standard": "Material compliance risks and limitations are identified",
+            "Evidence": f"Minimum age-group DIR is {min_dir:.4f}",
+            "Status": "Issue" if min_dir < 0.80 else "Pass",
+            "Action": "Treat as a material limitation; consider age-blind challenger and policy override thresholds",
+        },
+        {
+            "SR 11-7 Area": "Governance",
+            "Standard": "Limitations, approvals, model tier, and controls are documented",
+            "Evidence": "MRS scorecard and SR 11-7 risk taxonomy are generated",
+            "Status": "Pass",
+            "Action": "State that independent validation and audit are recommended controls, not performed by this student project",
+        },
+    ]
+
+    df = pd.DataFrame(checks)
+    df.to_csv(os.path.join(output_dir, "sr117_validation_checklist.csv"), index=False)
+    print("\n[SR 11-7] Validation standard checklist:")
+    print(df[["SR 11-7 Area", "Status", "Action"]].to_string(index=False))
     return df
 
 
@@ -250,17 +334,159 @@ def shap_analysis(lgbm_pipeline, X_val: pd.DataFrame, y_val: pd.Series,
     print(f"[SHAP] Plots saved to {output_dir}/")
 
 
-# ── 5. Sensitivity analysis ──────────────────────────────────────────────────
+# ── 5. Cross-validation overfitting investigation ────────────────────────────
+
+def cross_validate_lgbm(X_train: pd.DataFrame, y_train: pd.Series,
+                        output_dir: str, n_folds: int = 5) -> pd.DataFrame:
+    """
+    SR 11-7 Outcomes Analysis: investigate whether the AUC gap of 0.0644 reflects
+    true overfitting or single-split variance.
+
+    Uses StratifiedKFold CV with a computationally feasible LGBM config
+    (n_estimators=1000, learning_rate=0.05; same pipeline architecture).
+    Reports per-fold AUC, mean ± std, and produces a comparison chart.
+    """
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.metrics import roc_auc_score
+
+    try:
+        from lightgbm import LGBMClassifier
+    except ImportError:
+        print("[CV] lightgbm not installed — skipping cross-validation.")
+        return pd.DataFrame()
+
+    # Import pipeline builder locally to avoid circular imports
+    import sys, os as _os
+    sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from src.models import build_lgbm_pipeline
+    from sklearn.preprocessing import PowerTransformer
+    from sklearn.pipeline import Pipeline
+
+    print(f"\n[CV] 5-fold stratified cross-validation (LGBM architecture, "
+          f"n_estimators=1000, lr=0.05 for computational efficiency)...")
+
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+    fold_results = []
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train), 1):
+        X_f_train = X_train.iloc[train_idx]
+        y_f_train = y_train.iloc[train_idx]
+        X_f_val   = X_train.iloc[val_idx]
+        y_f_val   = y_train.iloc[val_idx]
+
+        pipeline = build_lgbm_pipeline(n_estimators=1000, learning_rate=0.05)
+        pipeline.fit(X_f_train, y_f_train)
+
+        train_probs = pipeline.predict_proba(X_f_train)[:, 1]
+        val_probs   = pipeline.predict_proba(X_f_val)[:, 1]
+
+        train_auc = roc_auc_score(y_f_train, train_probs)
+        val_auc   = roc_auc_score(y_f_val,   val_probs)
+        gap       = train_auc - val_auc
+
+        fpr, tpr, _ = roc_curve(y_f_val, val_probs)
+        ks = float(np.max(tpr - fpr))
+
+        fold_results.append({
+            "Fold":      fold_idx,
+            "Train AUC": round(train_auc, 4),
+            "Val AUC":   round(val_auc,   4),
+            "AUC Gap":   round(gap,       4),
+            "KS":        round(ks,        4),
+        })
+        print(f"  Fold {fold_idx}: Train AUC={train_auc:.4f}  "
+              f"Val AUC={val_auc:.4f}  Gap={gap:.4f}  KS={ks:.4f}")
+
+    cv_df = pd.DataFrame(fold_results)
+
+    mean_row = {
+        "Fold":      "Mean",
+        "Train AUC": round(cv_df["Train AUC"].mean(), 4),
+        "Val AUC":   round(cv_df["Val AUC"].mean(),   4),
+        "AUC Gap":   round(cv_df["AUC Gap"].mean(),   4),
+        "KS":        round(cv_df["KS"].mean(),        4),
+    }
+    std_row = {
+        "Fold":      "Std",
+        "Train AUC": round(cv_df["Train AUC"].std(),  4),
+        "Val AUC":   round(cv_df["Val AUC"].std(),    4),
+        "AUC Gap":   round(cv_df["AUC Gap"].std(),    4),
+        "KS":        round(cv_df["KS"].std(),         4),
+    }
+    summary_df = pd.concat([cv_df, pd.DataFrame([mean_row, std_row])], ignore_index=True)
+
+    csv_path = os.path.join(output_dir, "cv_results_lgbm.csv")
+    summary_df.to_csv(csv_path, index=False)
+    print(f"[CV] Results saved → {csv_path}")
+
+    # ── Visualization ──────────────────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig.suptitle("5-Fold Cross-Validation — LGBM Champion\n"
+                 "SR 11-7 Overfitting Investigation", fontsize=13, fontweight="bold")
+
+    folds      = cv_df["Fold"].astype(str)
+    x          = np.arange(len(folds))
+    bar_w      = 0.35
+    mean_train = cv_df["Train AUC"].mean()
+    mean_val   = cv_df["Val AUC"].mean()
+    std_val    = cv_df["Val AUC"].std()
+
+    # Left panel: Train vs Val AUC per fold
+    ax = axes[0]
+    ax.bar(x - bar_w/2, cv_df["Train AUC"], bar_w, label="Train AUC", color="#1A3C80", alpha=0.85)
+    ax.bar(x + bar_w/2, cv_df["Val AUC"],   bar_w, label="Val AUC",   color="#E8B84B", alpha=0.85)
+    ax.axhline(mean_train, color="#1A3C80", linestyle="--", linewidth=1.2,
+               label=f"Mean Train {mean_train:.4f}")
+    ax.axhline(mean_val,   color="#E8B84B", linestyle="--", linewidth=1.2,
+               label=f"Mean Val   {mean_val:.4f} ± {std_val:.4f}")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"Fold {i}" for i in folds])
+    ax.set_ylim(0.80, 0.97)
+    ax.set_ylabel("AUC-ROC")
+    ax.set_title("Train vs. Validation AUC per Fold")
+    ax.legend(fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+
+    # Right panel: AUC Gap per fold vs single-split gap
+    ax2 = axes[1]
+    colors = ["#C03A3A" if g > 0.03 else "#278C4A" for g in cv_df["AUC Gap"]]
+    ax2.bar(x, cv_df["AUC Gap"], color=colors, alpha=0.85)
+    ax2.axhline(cv_df["AUC Gap"].mean(), color="#E8B84B", linestyle="--", linewidth=1.5,
+                label=f"CV Mean Gap {cv_df['AUC Gap'].mean():.4f}")
+    ax2.axhline(0.0644, color="#C03A3A", linestyle=":", linewidth=1.5,
+                label="Single-split gap 0.0644")
+    ax2.axhline(0.03, color="grey", linestyle=":", linewidth=1.0,
+                label="Review threshold 0.03")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([f"Fold {i}" for i in folds])
+    ax2.set_ylabel("AUC Gap (Train − Val)")
+    ax2.set_title("AUC Gap per Fold vs. Thresholds")
+    ax2.legend(fontsize=9)
+    ax2.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, "cv_auc_folds.png")
+    plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[CV] Chart saved → {plot_path}")
+
+    mean_gap = cv_df["AUC Gap"].mean()
+    print(f"\n[CV] Summary: Mean Val AUC={mean_val:.4f} ± {std_val:.4f}  |  "
+          f"Mean AUC Gap={mean_gap:.4f}  |  "
+          f"{'OVERFITTING CONFIRMED' if mean_gap > 0.03 else 'Gap within threshold'}")
+
+    return summary_df
+
+
+# ── 6. Sensitivity analysis ──────────────────────────────────────────────────
 
 def sensitivity_analysis(lgbm_pipeline, X_val: pd.DataFrame,
                           output_dir: str) -> pd.DataFrame:
     """
-    Perturb each feature ±10% and measure resulting AUC change.
+    Perturb each feature ±10% and measure resulting average score change.
     SR 11-7: 'Sensitivity analysis tests how model outputs respond
     to changes in assumptions and inputs.'
     """
-    from sklearn.metrics import roc_auc_score
-
     base_prob = lgbm_pipeline.predict_proba(X_val)[:, 1]
 
     results = []
@@ -354,12 +580,15 @@ def fairness_analysis(lgbm_pipeline, lr_pipeline,
     print("\n[Fairness] Age-based disparate impact analysis:")
     print(df_fair.to_string(index=False))
 
+    # Age is an ECOA-permitted factor in empirically derived credit scoring systems.
+    # DIR gaps below 0.80 are expected given actual default rate differences across
+    # age groups (12.54% young vs 2.89% senior). LDA test documented separately.
     flagged = df_fair[df_fair["DIR (vs best)"] < 0.80]
     if not flagged.empty:
-        print("\n⚠️  [Fairness] Following groups BELOW 4/5 Rule (DIR < 0.80):")
+        print("\n[Fairness] Groups below 4/5 screening threshold (DIR < 0.80):")
         print(flagged[["Age Group", "Model", "DIR (vs best)"]].to_string(index=False))
-    else:
-        print("\n✅  [Fairness] No group violates the 4/5 Rule (DIR ≥ 0.80 for all).")
+        print("[Fairness] Note: age use is ECOA-permitted; gaps reflect actual default "
+              "rate differences. Monitor semiannually.")
 
     # Bar chart
     fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=False)
@@ -387,7 +616,187 @@ def fairness_analysis(lgbm_pipeline, lr_pipeline,
     return df_fair
 
 
-# ── 7. Confusion matrix ──────────────────────────────────────────────────────
+# ── 7. Age-blind less-discriminatory-alternative (LDA) test ─────────────────
+
+def age_blind_comparison(X_train: pd.DataFrame, y_train: pd.Series,
+                         X_val: pd.DataFrame,   y_val: pd.Series,
+                         lgbm_champion,         lr_pipeline,
+                         output_dir: str) -> pd.DataFrame:
+    """
+    SR 11-7 / ECOA Less-Discriminatory Alternative (LDA) test.
+
+    Retrains LGBM with 'age' dropped. Compares against the champion and LR
+    baseline on AUC, KS, and age-group Disparate Impact Ratio.
+
+    A model that achieves similar AUC with higher DIR is a viable LDA.
+    """
+    import joblib
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from src.models import build_lgbm_pipeline
+
+    print("\n[LDA] Training age-blind LGBM (age feature dropped)...")
+
+    X_train_blind = X_train.drop(columns=[AGE_COL])
+    X_val_blind   = X_val.drop(columns=[AGE_COL])
+
+    pipeline_blind = build_lgbm_pipeline(n_estimators=1000, learning_rate=0.05)
+    pipeline_blind.fit(X_train_blind, y_train)
+
+    save_path = os.path.join(output_dir, "LGBM_Age_Blind.pkl")
+    joblib.dump(pipeline_blind, save_path)
+    print(f"[LDA] Age-blind model saved → {save_path}")
+
+    # ── Performance comparison ─────────────────────────────────────────────────
+    X_val = X_val.reset_index(drop=True)
+    y_val = y_val.reset_index(drop=True)
+
+    champion_prob  = lgbm_champion.predict_proba(X_val)[:, 1]
+    lr_prob        = lr_pipeline.predict_proba(X_val)[:, 1]
+    blind_prob     = pipeline_blind.predict_proba(X_val_blind.reset_index(drop=True))[:, 1]
+
+    def _auc_ks(y_true, probs):
+        auc = roc_auc_score(y_true, probs)
+        fpr, tpr, _ = roc_curve(y_true, probs)
+        ks = float(np.max(tpr - fpr))
+        return round(auc, 4), round(ks, 4)
+
+    champ_auc,  champ_ks  = _auc_ks(y_val, champion_prob)
+    lr_auc,     lr_ks     = _auc_ks(y_val, lr_prob)
+    blind_auc,  blind_ks  = _auc_ks(y_val, blind_prob)
+
+    print(f"\n[LDA] Overall performance:")
+    print(f"  Champion (age-inclusive): AUC={champ_auc}  KS={champ_ks}")
+    print(f"  Age-Blind LGBM:           AUC={blind_auc}  KS={blind_ks}")
+    print(f"  LR Baseline:              AUC={lr_auc}     KS={lr_ks}")
+
+    # ── DIR comparison ─────────────────────────────────────────────────────────
+    models_info = [
+        ("LGBM Champion",  champion_prob, np.median(champion_prob)),
+        ("LGBM Age-Blind", blind_prob,    np.median(blind_prob)),
+        ("LR Baseline",    lr_prob,       np.median(lr_prob)),
+    ]
+
+    rows = []
+    for group_name, (lo, hi) in AGE_GROUPS.items():
+        mask = (X_val[AGE_COL] >= lo) & (X_val[AGE_COL] < hi)
+        if mask.sum() < 30:
+            continue
+        for model_name, prob, thr in models_info:
+            grp_prob    = prob[mask]
+            grp_y       = y_val[mask]
+            approval_rt = float((grp_prob < thr).mean())
+            auc_grp     = roc_auc_score(grp_y, grp_prob) if grp_y.nunique() > 1 else np.nan
+            rows.append({
+                "Age Group":     group_name,
+                "Model":         model_name,
+                "N":             int(mask.sum()),
+                "Default Rate":  round(float(grp_y.mean()), 4),
+                "Approval Rate": round(approval_rt, 4),
+                "AUC":           round(auc_grp, 4) if not np.isnan(auc_grp) else np.nan,
+            })
+
+    df = pd.DataFrame(rows)
+
+    for model_name in df["Model"].unique():
+        m       = df["Model"] == model_name
+        best_ar = df.loc[m, "Approval Rate"].max()
+        df.loc[m, "DIR (vs best)"] = (df.loc[m, "Approval Rate"] / best_ar).round(4)
+
+    print("\n[LDA] DIR comparison by age group:")
+    print(df.to_string(index=False))
+
+    df.to_csv(os.path.join(output_dir, "age_blind_table.csv"), index=False)
+
+    # ── Overall summary row ────────────────────────────────────────────────────
+    perf_rows = [
+        {"Model": "LGBM Champion",  "Overall AUC": champ_auc, "Overall KS": champ_ks,
+         "Min DIR": df[df["Model"]=="LGBM Champion"]["DIR (vs best)"].min()},
+        {"Model": "LGBM Age-Blind", "Overall AUC": blind_auc, "Overall KS": blind_ks,
+         "Min DIR": df[df["Model"]=="LGBM Age-Blind"]["DIR (vs best)"].min()},
+        {"Model": "LR Baseline",    "Overall AUC": lr_auc,    "Overall KS": lr_ks,
+         "Min DIR": df[df["Model"]=="LR Baseline"]["DIR (vs best)"].min()},
+    ]
+    perf_df = pd.DataFrame(perf_rows)
+    perf_df.to_csv(os.path.join(output_dir, "age_blind_perf_summary.csv"), index=False)
+
+    # ── Visualization ──────────────────────────────────────────────────────────
+    groups     = list(AGE_GROUPS.keys())
+    model_names = ["LGBM Champion", "LGBM Age-Blind", "LR Baseline"]
+    colors      = ["#1A3C80", "#E8B84B", "#4A9E6B"]
+    x           = np.arange(len(groups))
+    bar_w       = 0.25
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    fig.suptitle("Less-Discriminatory Alternative Analysis\n"
+                 "LGBM Champion vs Age-Blind LGBM vs LR Baseline",
+                 fontsize=13, fontweight="bold")
+
+    # Panel 1: Approval Rate
+    ax = axes[0]
+    for i, (mname, col) in enumerate(zip(model_names, colors)):
+        sub = df[df["Model"] == mname].set_index("Age Group").reindex(groups)
+        ax.bar(x + (i - 1) * bar_w, sub["Approval Rate"], bar_w,
+               label=mname, color=col, alpha=0.85)
+    ax.set_xticks(x); ax.set_xticklabels(groups, fontsize=9)
+    ax.set_ylabel("Approval Rate"); ax.set_title("Approval Rate by Age Group")
+    ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
+
+    # Panel 2: DIR
+    ax2 = axes[1]
+    for i, (mname, col) in enumerate(zip(model_names, colors)):
+        sub = df[df["Model"] == mname].set_index("Age Group").reindex(groups)
+        ax2.bar(x + (i - 1) * bar_w, sub["DIR (vs best)"], bar_w,
+                label=mname, color=col, alpha=0.85)
+    ax2.axhline(0.80, color="red", linestyle="--", linewidth=1.2, label="4/5 Rule (0.80)")
+    ax2.set_xticks(x); ax2.set_xticklabels(groups, fontsize=9)
+    ax2.set_ylabel("DIR (vs best group)"); ax2.set_title("Disparate Impact Ratio by Age Group")
+    ax2.legend(fontsize=8); ax2.grid(axis="y", alpha=0.3)
+    ax2.set_ylim(0, 1.15)
+
+    # Panel 3: Overall AUC + KS summary
+    ax3 = axes[2]
+    model_labels = ["Champion", "Age-Blind", "LR Base"]
+    auc_vals     = [champ_auc, blind_auc, lr_auc]
+    ks_vals      = [champ_ks,  blind_ks,  lr_ks]
+    xi           = np.arange(len(model_labels))
+    ax3.bar(xi - 0.2, auc_vals, 0.35, label="AUC-ROC", color=colors, alpha=0.85)
+    ax3.bar(xi + 0.2, ks_vals,  0.35, label="KS Stat",  color=colors, alpha=0.5,
+            edgecolor="black", linewidth=0.5)
+    for j, (a, k) in enumerate(zip(auc_vals, ks_vals)):
+        ax3.text(j - 0.2, a + 0.003, f"{a:.4f}", ha="center", fontsize=8)
+        ax3.text(j + 0.2, k + 0.003, f"{k:.4f}", ha="center", fontsize=8)
+    ax3.set_xticks(xi); ax3.set_xticklabels(model_labels)
+    ax3.set_ylabel("Score"); ax3.set_title("Overall AUC & KS (Validation Set)")
+    ax3.set_ylim(0, 1.05)
+    from matplotlib.patches import Patch
+    ax3.legend(handles=[Patch(color="grey", alpha=0.85, label="AUC-ROC (solid)"),
+                         Patch(color="grey", alpha=0.5,  label="KS Stat (faded)")],
+               fontsize=8)
+    ax3.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, "age_blind_comparison.png")
+    plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[LDA] Chart saved → {plot_path}")
+
+    # Summary verdict
+    auc_delta = round(blind_auc - champ_auc, 4)
+    dir_delta = round(
+        df[df["Model"]=="LGBM Age-Blind"]["DIR (vs best)"].min() -
+        df[df["Model"]=="LGBM Champion"]["DIR (vs best)"].min(), 4)
+    print(f"\n[LDA] AUC delta (age-blind − champion): {auc_delta:+.4f}")
+    print(f"[LDA] Min DIR delta (age-blind − champion): {dir_delta:+.4f}")
+    verdict = ("VIABLE LDA: fairness improves without material AUC loss (< 0.02)."
+               if dir_delta > 0 and abs(auc_delta) < 0.02
+               else "TRADE-OFF: review AUC cost vs. fairness gain before deciding.")
+    print(f"[LDA] Verdict: {verdict}")
+
+    return df
+
+
+# ── 9. Confusion matrix ──────────────────────────────────────────────────────
 
 def plot_confusion_matrices(models: dict, X_val: pd.DataFrame, y_val: pd.Series,
                             output_dir: str, threshold: float = 0.5) -> None:

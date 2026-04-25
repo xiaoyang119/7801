@@ -5,6 +5,8 @@ Stage 4 – Model Risk Tiering & SR 11-7 Governance Mapping
 
 Implements the Kiritz, Ravitz & Levonian (2019) Model Risk Scorecard (MRS).
 Also produces the SR 11-7 Risk Taxonomy summary expected in the capstone report.
+The scorecard is an internal tiering tool for this project; SR 11-7 itself
+does not prescribe a numeric score.
 
 MRS Scorecard (max 100 pts):
   • Materiality (30 pts)           — business/financial impact

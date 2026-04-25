@@ -1,11 +1,13 @@
 Feature,PSI,Status
 DebtRatio,0.0005,🟢 Stable
 MonthlyIncome,0.0004,🟢 Stable
-age,0.0003,🟢 Stable
 RevolvingUtilizationOfUnsecuredLines,0.0003,🟢 Stable
+age,0.0003,🟢 Stable
 NumberOfOpenCreditLinesAndLoans,0.0002,🟢 Stable
 NumberRealEstateLoansOrLines,0.0001,🟢 Stable
 NumberOfTime30-59DaysPastDueNotWorse,0.0,🟢 Stable
 NumberOfTimes90DaysLate,0.0,🟢 Stable
 NumberOfTime60-89DaysPastDueNotWorse,0.0,🟢 Stable
 NumberOfDependents,0.0,🟢 Stable
+MonthlyIncome_missing,0.0,🟢 Stable
+NumberOfDependents_missing,0.0,🟢 Stable
